@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gam3eya Manager</title>
+    <link rel="stylesheet" href="src/styles.css" />
+  </head>
+  <body>
+    <section class="auth-screen" id="authScreen"></section>
+
+    <main class="app-shell hidden" id="appShell">
+      <aside class="sidebar">
+        <div>
+          <p class="eyebrow">Private tracker</p>
+          <h1>Gam3eya Manager</h1>
+          <p class="muted">Track circles, members, monthly payments, and payout turns.</p>
+        </div>
+
+        <section class="sidebar-section">
+          <div class="section-title">
+            <span>Associations</span>
+            <button class="ghost-button" id="exportJson" type="button">Export</button>
+          </div>
+          <div class="association-list" id="associationList"></div>
+        </section>
+
+        <form class="create-box" id="associationForm">
+          <label>
+            New association
+            <input id="newAssociationName" placeholder="Friends group" required />
+          </label>
+          <div class="form-grid two">
+            <label>
+              Monthly amount
+              <input id="newAssociationAmount" type="number" min="0" value="1000" />
+            </label>
+            <label>
+              Start month
+              <input id="newAssociationStart" type="month" />
+            </label>
+          </div>
+          <button class="primary-button" type="submit">Add association</button>
+        </form>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="associationStatus">active</p>
+            <h2 id="associationTitle">Association</h2>
+            <p class="muted" id="associationSubtitle"></p>
+          </div>
+          <div class="session-tools">
+            <span id="sessionStatus"></span>
+            <button class="ghost-button" id="logoutButton" type="button">Logout</button>
+          </div>
+          <div class="cycle-picker">
+            <button class="icon-button" id="previousCycle" type="button" aria-label="Previous cycle">-</button>
+            <label>
+              Cycle
+              <select id="cycleSelect"></select>
+            </label>
+            <button class="icon-button" id="nextCycle" type="button" aria-label="Next cycle">+</button>
+          </div>
+        </header>
+
+        <section class="summary-grid" id="summaryGrid"></section>
+
+        <nav class="tabs" id="tabs" aria-label="Association sections"></nav>
+
+        <section id="tabContent"></section>
+      </section>
+    </main>
+    <script src="src/app.js"></script>
+  </body>
+</html>
