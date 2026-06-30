@@ -182,6 +182,25 @@ button {
   text-transform: uppercase;
 }
 
+.sidebar-actions,
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sidebar-actions .ghost-button {
+  min-height: 32px;
+  padding: 6px 9px;
+}
+
+.sidebar-note {
+  margin: 0;
+  color: #9ca3af;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .association-list {
   display: grid;
   gap: 10px;
@@ -202,6 +221,10 @@ button {
 .association-item.selected {
   border-color: #6ea8ff;
   background: #1d4ed8;
+}
+
+.association-item.locked {
+  cursor: default;
 }
 
 .association-item small {
@@ -387,7 +410,7 @@ textarea:focus {
 
 table {
   width: 100%;
-  min-width: 850px;
+  min-width: 760px;
   border-collapse: collapse;
 }
 
@@ -430,10 +453,31 @@ td small {
   color: #1d4ed8;
 }
 
+.tag.paid-chip {
+  background: #dcfce7;
+  color: #047857;
+}
+
+.tag.unpaid-chip {
+  background: #fef3c7;
+  color: #b45309;
+}
+
 .status-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   min-width: 90px;
   background: #f3f4f6;
   color: #6b7280;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
 }
 
 .status-toggle.paid {
@@ -466,6 +510,11 @@ td small {
   padding: 14px;
 }
 
+.member-card.editing {
+  border-color: #1d4ed8;
+  background: #eff6ff;
+}
+
 .member-card strong,
 .member-card span,
 .member-card small,
@@ -493,11 +542,6 @@ td small {
   background: #111827;
   color: #ffffff;
   font-weight: 900;
-}
-
-.row-actions {
-  display: flex;
-  gap: 8px;
 }
 
 .settings-panel {
@@ -613,6 +657,10 @@ td small {
 
   .row-actions button {
     flex: 1;
+  }
+
+  table {
+    min-width: 640px;
   }
 
   .session-tools {

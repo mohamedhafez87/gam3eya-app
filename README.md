@@ -26,19 +26,31 @@ The published URL will normally be:
 https://USERNAME.github.io/REPO_NAME/
 ```
 
-This app is already configured for repository-subpath hosting because `index.html` uses relative asset paths such as `src/styles.css` and `src/app.js`.
+The app is configured for repository-subpath hosting because `index.html` uses relative asset paths such as `src/styles.css` and `src/app.js`.
 
 ## Local Access Accounts
 
-The GitHub Pages version supports local username/password access:
+Each association has its own local admin account:
 
-- First open creates an association admin account.
-- Admins can manage associations, members, payments, turn order, and settings.
-- Members can log in and see only their own personal info, payment status, current cycle, current receiver, and payment history.
-- Passwords are stored as SHA-256 hashes using the browser Web Crypto API.
+- If an association has no admin yet, selecting it shows first-time admin setup.
+- An admin can manage only the association they logged into.
+- Creating a new association does not copy the current admin credentials. The new association requires its own admin setup.
+- Members can log in only to the association where their username exists.
+- Members see only their own personal info, payment status, current cycle, receiver, and payment history.
 
-Existing `localStorage` data is migrated safely. Existing members remain visible and can have blank usernames until an admin updates them.
+Passwords are stored locally as salted PBKDF2-SHA-256 password records through the browser Web Crypto API. Older SHA-256 password hashes are still accepted and are upgraded after a successful login.
+
+Existing `localStorage` data is migrated safely. Associations, members, payments, turn order, old admin hashes, and old member hashes are preserved.
+
+## Export and Import
+
+Admins can export only the currently logged-in association.
+
+- **Backup JSON** includes association data plus local auth password hashes/records. Use it to restore the association in the same browser or another personal device.
+- **Share JSON** removes admin credentials, member password hashes/records, and member national IDs. Use it when sending non-auth association data to someone else.
+
+To restore data, log in as an admin and choose **Import**. The app accepts Gam3eya backup/share JSON files or a single exported association object. If the imported association ID already exists, the app asks whether to replace the existing association or import it as a copy. Share imports without admin credentials will require first-time admin setup before management.
 
 ## Security Note
 
-This GitHub Pages version is for personal/local tracking only. Static hosting cannot protect private data or passwords from a determined user. For real shared secure access, use a backend such as Supabase, Firebase, or a Node API with a database and server-side authentication.
+This GitHub Pages version is for personal/local tracking only. Static GitHub Pages/localStorage cannot protect private data or passwords from a determined user. For real shared secure access, use a backend/database such as Supabase, Firebase, or a Node API.

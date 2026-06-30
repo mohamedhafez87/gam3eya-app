@@ -1,5 +1,7 @@
 const STORAGE_KEY = "gam3eya-manager:v1";
-const STORAGE_VERSION = 2;
+const STORAGE_VERSION = 3;
+const PASSWORD_ALGORITHM = "PBKDF2-SHA-256";
+const PASSWORD_ITERATIONS = 150000;
 
 const state = {
   data: loadState(),
@@ -8,6 +10,9 @@ const state = {
   activeTab: "payments",
   session: null,
   authError: "",
+  memberError: "",
+  importError: "",
+  editingMemberId: "",
 };
 
 state.selectedAssociationId = state.data.associations[0]?.id || "";
@@ -33,6 +38,10 @@ function currentMonth() {
   return new Date().toISOString().slice(0, 7);
 }
 
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function monthLabel(startMonth, cycleIndex) {
   const date = new Date(`${startMonth || currentMonth()}-01T00:00:00`);
   date.setMonth(date.getMonth() + cycleIndex);
@@ -49,6 +58,7 @@ function emptyMember() {
     notes: "",
     username: "",
     passwordHash: "",
+    passwordRecord: null,
     role: "member",
   };
 }
@@ -95,13 +105,13 @@ function seedData() {
               paid: true,
               amount: 3000,
               method: "Cash",
-              paidAt: new Date().toISOString().slice(0, 10),
+              paidAt: todayIso(),
             },
             [members[1].id]: {
               paid: true,
               amount: 3000,
               method: "Bank transfer",
-              paidAt: new Date().toISOString().slice(0, 10),
+              paidAt: todayIso(),
             },
           },
         },
@@ -110,13 +120,44 @@ function seedData() {
   };
 }
 
+function normalizePasswordRecord(record) {
+  if (
+    record?.algorithm === PASSWORD_ALGORITHM &&
+    Number(record.iterations) > 0 &&
+    record.salt &&
+    record.hash
+  ) {
+    return {
+      algorithm: PASSWORD_ALGORITHM,
+      iterations: Number(record.iterations),
+      salt: String(record.salt),
+      hash: String(record.hash),
+    };
+  }
+  return null;
+}
+
 function normalizeMember(member) {
   return {
     ...emptyMember(),
     ...member,
+    id: member?.id || uid(),
     username: String(member?.username || "").trim(),
     passwordHash: String(member?.passwordHash || ""),
+    passwordRecord: normalizePasswordRecord(member?.passwordRecord),
     role: member?.role === "admin" ? "admin" : "member",
+  };
+}
+
+function normalizeAdmin(admin) {
+  if (!admin?.username) return null;
+  const passwordHash = String(admin.passwordHash || "");
+  const passwordRecord = normalizePasswordRecord(admin.passwordRecord);
+  if (!passwordHash && !passwordRecord) return null;
+  return {
+    username: String(admin.username).trim(),
+    passwordHash,
+    passwordRecord,
   };
 }
 
@@ -138,17 +179,13 @@ function normalizeAssociation(association) {
     monthlyAmount: Number(association?.monthlyAmount || 0),
     startMonth: association?.startMonth || currentMonth(),
     status: association?.status || "active",
-    admin: association?.admin?.username && association?.admin?.passwordHash
-      ? {
-          username: String(association.admin.username).trim(),
-          passwordHash: String(association.admin.passwordHash),
-        }
-      : null,
+    admin: normalizeAdmin(association?.admin),
     members,
     turnOrder: [...existingOrder, ...missingOrder],
-    payments: association?.payments && typeof association.payments === "object"
-      ? association.payments
-      : {},
+    payments:
+      association?.payments && typeof association.payments === "object"
+        ? association.payments
+        : {},
   };
 }
 
@@ -182,19 +219,33 @@ function selectedAssociation() {
   );
 }
 
+function sessionAssociation() {
+  if (!state.session) return selectedAssociation();
+  return state.data.associations.find((item) => item.id === state.session.associationId);
+}
+
 function currentUserIsAdmin() {
   return state.session?.role === "admin";
 }
 
-function currentMember(association = selectedAssociation()) {
+function currentMember(association = sessionAssociation()) {
   if (!state.session?.memberId) return null;
   return association?.members.find((member) => member.id === state.session.memberId) || null;
 }
 
 function updateAssociation(updater) {
-  const association = selectedAssociation();
+  const association = sessionAssociation() || selectedAssociation();
   state.data.associations = state.data.associations.map((item) =>
     item.id === association.id ? normalizeAssociation(updater(item)) : item
+  );
+  saveState();
+  render();
+}
+
+function replaceAssociation(association) {
+  const normalized = normalizeAssociation(association);
+  state.data.associations = state.data.associations.map((item) =>
+    item.id === normalized.id ? normalized : item
   );
   saveState();
   render();
@@ -213,7 +264,20 @@ function ensureCryptoAvailable() {
   return Boolean(window.crypto?.subtle && window.TextEncoder);
 }
 
-async function hashPassword(password) {
+function bytesToBase64(bytes) {
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+async function sha256Hex(password) {
   if (!ensureCryptoAvailable()) {
     throw new Error("Password hashing is unavailable in this browser or context.");
   }
@@ -224,12 +288,90 @@ async function hashPassword(password) {
     .join("");
 }
 
-async function verifyPassword(password, hash) {
-  if (!hash) return false;
-  return (await hashPassword(password)) === hash;
+async function createPasswordRecord(password) {
+  if (!ensureCryptoAvailable()) {
+    throw new Error("Password hashing is unavailable in this browser or context.");
+  }
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt,
+      iterations: PASSWORD_ITERATIONS,
+    },
+    keyMaterial,
+    256
+  );
+  return {
+    algorithm: PASSWORD_ALGORITHM,
+    iterations: PASSWORD_ITERATIONS,
+    salt: bytesToBase64(salt),
+    hash: bytesToBase64(new Uint8Array(bits)),
+  };
+}
+
+async function verifyPassword(password, passwordRecord) {
+  const record = normalizePasswordRecord(passwordRecord);
+  if (!record) return false;
+  if (!ensureCryptoAvailable()) {
+    throw new Error("Password verification is unavailable in this browser or context.");
+  }
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt: base64ToBytes(record.salt),
+      iterations: record.iterations,
+    },
+    keyMaterial,
+    256
+  );
+  return bytesToBase64(new Uint8Array(bits)) === record.hash;
+}
+
+function hasCredential(account) {
+  return Boolean(account?.passwordRecord || account?.passwordHash);
+}
+
+async function verifyAccountPassword(account, password) {
+  if (account?.passwordRecord && (await verifyPassword(password, account.passwordRecord))) {
+    return { ok: true, legacy: false };
+  }
+  if (account?.passwordHash && (await sha256Hex(password)) === account.passwordHash) {
+    return { ok: true, legacy: true };
+  }
+  return { ok: false, legacy: false };
 }
 
 function render() {
+  if (!state.data.associations.length) return renderEmptyScreen();
+
+  if (state.session) {
+    const scopedAssociation = sessionAssociation();
+    if (!scopedAssociation) {
+      state.session = null;
+      state.selectedAssociationId = state.data.associations[0]?.id || "";
+      render();
+      return;
+    }
+    state.selectedAssociationId = scopedAssociation.id;
+  }
+
   const association = selectedAssociation();
   if (!association) return renderEmptyScreen();
 
@@ -253,22 +395,34 @@ function render() {
 }
 
 function renderEmptyScreen() {
-  document.body.innerHTML = `
-    <section class="empty-screen">
-      <div class="empty-card">
+  $("#appShell").classList.add("hidden");
+  $("#authScreen").classList.remove("hidden");
+  $("#authScreen").innerHTML = `
+    <section class="auth-card">
+      <div>
         <p class="eyebrow">Gam3eya Manager</p>
         <h1>No associations</h1>
-        <p class="muted">Reload the page to restore the starter data.</p>
+        <p class="muted">Reset the demo data or import a backup to start tracking again.</p>
+      </div>
+      <div class="row-actions">
+        <button class="primary-button" id="restoreSeedData" type="button">Restore demo data</button>
       </div>
     </section>
   `;
+  $("#restoreSeedData").addEventListener("click", () => {
+    if (!confirm("Restore demo data? This overwrites the current empty state.")) return;
+    state.data = seedData();
+    state.selectedAssociationId = state.data.associations[0].id;
+    saveState();
+    render();
+  });
 }
 
 function renderAuthScreen(association) {
   $("#appShell").classList.add("hidden");
   $("#authScreen").classList.remove("hidden");
 
-  const hasAdmin = Boolean(association.admin?.username && association.admin?.passwordHash);
+  const hasAdmin = hasCredential(association.admin);
   const associationOptions = state.data.associations
     .map(
       (item) =>
@@ -282,7 +436,7 @@ function renderAuthScreen(association) {
         <p class="eyebrow">Gam3eya Manager</p>
         <h1>${hasAdmin ? "Login" : "Create admin access"}</h1>
         <p class="muted">
-          This static version uses local browser storage and local password hashes only.
+          Choose an association, then sign in with that association's local account.
         </p>
       </div>
       <form id="${hasAdmin ? "loginForm" : "adminSetupForm"}" class="auth-form">
@@ -312,7 +466,7 @@ function renderAuthScreen(association) {
         <button class="primary-button" type="submit">${hasAdmin ? "Login" : "Create admin"}</button>
       </form>
       <p class="security-note">
-        GitHub Pages cannot provide real secure shared authentication. Use a backend/database for production security.
+        Static GitHub Pages/localStorage access is for personal tracking only and is not real secure multi-user authentication.
       </p>
     </section>
   `;
@@ -345,10 +499,11 @@ async function handleAdminSetup(event) {
   if (password !== confirmPassword) return setAuthError("Password confirmation must match.");
   if (usernameExists(association, username)) return setAuthError("That username already exists in this association.");
 
-  const passwordHash = await hashPassword(password);
-  updateAssociation((item) => ({ ...item, admin: { username, passwordHash } }));
+  const passwordRecord = await createPasswordRecord(password);
+  replaceAssociation({ ...association, admin: { username, passwordHash: "", passwordRecord } });
   state.session = { associationId: association.id, role: "admin", username, memberId: "" };
   state.authError = "";
+  state.activeTab = "payments";
   render();
 }
 
@@ -363,28 +518,48 @@ async function handleLogin(event) {
   if (!username || !password) return setAuthError("Enter a username and password.");
 
   try {
-    if (
-      association.admin?.username === username &&
-      (await verifyPassword(password, association.admin.passwordHash))
-    ) {
-      state.session = { associationId: association.id, role: "admin", username, memberId: "" };
-      state.authError = "";
-      render();
-      return;
+    if (association.admin?.username === username) {
+      const result = await verifyAccountPassword(association.admin, password);
+      if (result.ok) {
+        if (result.legacy) {
+          const passwordRecord = await createPasswordRecord(password);
+          replaceAssociation({
+            ...association,
+            admin: { ...association.admin, passwordHash: "", passwordRecord },
+          });
+        }
+        state.session = { associationId: association.id, role: "admin", username, memberId: "" };
+        state.authError = "";
+        state.activeTab = "payments";
+        render();
+        return;
+      }
     }
 
     const member = association.members.find((item) => item.username === username);
-    if (member?.passwordHash && (await verifyPassword(password, member.passwordHash))) {
-      state.session = {
-        associationId: association.id,
-        role: member.role === "admin" ? "admin" : "member",
-        username,
-        memberId: member.id,
-      };
-      state.activeTab = member.role === "admin" ? "payments" : "my-status";
-      state.authError = "";
-      render();
-      return;
+    if (member) {
+      const result = await verifyAccountPassword(member, password);
+      if (result.ok) {
+        if (result.legacy) {
+          const passwordRecord = await createPasswordRecord(password);
+          replaceAssociation({
+            ...association,
+            members: association.members.map((item) =>
+              item.id === member.id ? { ...item, passwordHash: "", passwordRecord } : item
+            ),
+          });
+        }
+        state.session = {
+          associationId: association.id,
+          role: member.role === "admin" ? "admin" : "member",
+          username,
+          memberId: member.id,
+        };
+        state.activeTab = member.role === "admin" ? "payments" : "my-status";
+        state.authError = "";
+        render();
+        return;
+      }
     }
   } catch {
     return setAuthError("Password verification failed in this browser.");
@@ -413,28 +588,18 @@ function usernameExists(association, username, ignoredMemberId = "") {
 function renderAssociations(activeAssociation) {
   const isAdmin = currentUserIsAdmin();
   $("#exportJson").classList.toggle("hidden", !isAdmin);
+  $("#shareJson").classList.toggle("hidden", !isAdmin);
+  $("#importJsonButton").classList.toggle("hidden", !isAdmin);
+  $("#importJson").classList.toggle("hidden", true);
   $("#associationForm").classList.toggle("hidden", !isAdmin);
 
-  $("#associationList").innerHTML = state.data.associations
-    .filter((item) => isAdmin || item.id === state.session.associationId)
-    .map(
-      (item) => `
-        <button class="association-item ${item.id === activeAssociation.id ? "selected" : ""}" data-association-id="${item.id}" type="button">
-          <span>${escapeHtml(item.name)}</span>
-          <small>${formatMoney(item.monthlyAmount)} / member</small>
-        </button>
-      `
-    )
-    .join("");
-
-  $$(".association-item").forEach((button) => {
-    button.addEventListener("click", () => {
-      if (!currentUserIsAdmin() && button.dataset.associationId !== state.session.associationId) return;
-      state.selectedAssociationId = button.dataset.associationId;
-      state.selectedCycle = 0;
-      render();
-    });
-  });
+  $("#associationList").innerHTML = `
+    <button class="association-item selected locked" type="button">
+      <span>${escapeHtml(activeAssociation.name)}</span>
+      <small>${formatMoney(activeAssociation.monthlyAmount)} / member</small>
+    </button>
+    <p class="sidebar-note">Access is scoped to the association used at login.</p>
+  `;
 }
 
 function renderHeader(association, cycleCount) {
@@ -530,6 +695,8 @@ function renderTabs() {
   $$("#tabs button").forEach((button) => {
     button.addEventListener("click", () => {
       state.activeTab = button.dataset.tab;
+      state.memberError = "";
+      state.importError = "";
       render();
     });
   });
@@ -590,7 +757,7 @@ function paymentPanelHtml(association) {
           </td>
           <td>
             <button class="status-toggle ${paid ? "paid" : ""}" data-pay-toggle="${member.id}" type="button">
-              ${paid ? "Paid" : "Unpaid"}
+              <span class="status-dot"></span>${paid ? "Paid" : "Unpaid"}
             </button>
           </td>
           <td>
@@ -642,16 +809,22 @@ function paymentPanelHtml(association) {
 }
 
 function membersPanelHtml(association) {
+  const editingMember =
+    association.members.find((member) => member.id === state.editingMemberId) || null;
+  const formTitle = editingMember ? "Edit member" : "Add member";
   const members = association.members
     .map(
       (member) => `
-        <article class="member-card">
+        <article class="member-card ${member.id === state.editingMemberId ? "editing" : ""}">
           <div>
             <strong>${escapeHtml(member.name)}</strong>
             <span>${escapeHtml(member.phone || "No phone")}</span>
             <small>${escapeHtml(member.username ? `@${member.username} - ${member.role}` : "No login username")}</small>
           </div>
-          <button class="danger-button" data-remove-member="${member.id}" type="button">Remove</button>
+          <div class="row-actions">
+            <button class="ghost-button" data-edit-member="${member.id}" type="button">Edit</button>
+            <button class="danger-button" data-remove-member="${member.id}" type="button">Remove</button>
+          </div>
         </article>
       `
     )
@@ -660,29 +833,34 @@ function membersPanelHtml(association) {
   return `
     <section class="split-grid">
       <form class="panel member-form" id="memberForm">
-        <h3>Add member</h3>
+        <div class="panel-heading">
+          <h3>${formTitle}</h3>
+          ${editingMember ? `<button class="ghost-button" id="cancelEditMember" type="button">Cancel</button>` : ""}
+        </div>
+        <input type="hidden" name="memberId" value="${escapeHtml(editingMember?.id || "")}" />
         <div class="form-grid two">
-          <label>Full name<input name="name" placeholder="Member name" required /></label>
-          <label>Phone<input name="phone" placeholder="01..." /></label>
-          <label>National ID<input name="nationalId" /></label>
-          <label>Address<input name="address" /></label>
-          <label>Username<input name="username" autocomplete="off" required /></label>
+          <label>Full name<input name="name" placeholder="Member name" value="${escapeHtml(editingMember?.name || "")}" required /></label>
+          <label>Phone<input name="phone" placeholder="01..." value="${escapeHtml(editingMember?.phone || "")}" /></label>
+          <label>National ID<input name="nationalId" value="${escapeHtml(editingMember?.nationalId || "")}" /></label>
+          <label>Address<input name="address" value="${escapeHtml(editingMember?.address || "")}" /></label>
+          <label>Username<input name="username" autocomplete="off" value="${escapeHtml(editingMember?.username || "")}" ${editingMember ? "" : "required"} /></label>
           <label>Role
             <select name="role">
-              <option value="member">Member</option>
-              <option value="admin">Admin</option>
+              <option value="member" ${editingMember?.role !== "admin" ? "selected" : ""}>Member</option>
+              <option value="admin" ${editingMember?.role === "admin" ? "selected" : ""}>Admin</option>
             </select>
           </label>
-          <label>Password<input name="password" type="password" autocomplete="new-password" required /></label>
-          <label>Confirm password<input name="confirmPassword" type="password" autocomplete="new-password" required /></label>
+          <label>${editingMember ? "New password" : "Password"}<input name="password" type="password" autocomplete="new-password" ${editingMember ? "" : "required"} /></label>
+          <label>${editingMember ? "Confirm new password" : "Confirm password"}<input name="confirmPassword" type="password" autocomplete="new-password" ${editingMember ? "" : "required"} /></label>
         </div>
-        <label>Notes<textarea name="notes"></textarea></label>
-        <p class="form-error hidden" id="memberFormError"></p>
-        <button class="primary-button" type="submit">Add member</button>
+        <label>Notes<textarea name="notes">${escapeHtml(editingMember?.notes || "")}</textarea></label>
+        <p class="muted">${editingMember ? "Leave password fields blank to keep the current password." : "Member usernames are unique within this association."}</p>
+        ${state.memberError ? `<p class="form-error">${escapeHtml(state.memberError)}</p>` : ""}
+        <button class="primary-button" type="submit">${editingMember ? "Save member" : "Add member"}</button>
       </form>
       <section class="panel">
         <h3>Member records</h3>
-        <div class="member-list">${members || "<p class=\"muted\">No members yet.</p>"}</div>
+        <div class="member-list">${members || "<p class=\"muted\">No members yet. Add the first member to start tracking payments.</p>"}</div>
       </section>
     </section>
   `;
@@ -718,7 +896,7 @@ function turnsPanelHtml(association) {
           <p class="muted">Move members to change who receives each month.</p>
         </div>
       </div>
-      <div class="turn-list">${rows || "<p class=\"muted\">No members yet.</p>"}</div>
+      <div class="turn-list">${rows || "<p class=\"muted\">No members yet. Add members before setting a payout order.</p>"}</div>
     </section>
   `;
 }
@@ -735,6 +913,7 @@ function settingsPanelHtml(association) {
       <p class="security-note">
         This GitHub Pages version is for personal/local tracking only. Static hosting cannot protect private data or passwords from a determined user. For real shared secure access, use a backend such as Supabase, Firebase, or a Node API.
       </p>
+      ${state.importError ? `<p class="form-error">${escapeHtml(state.importError)}</p>` : ""}
       <button class="danger-button" id="resetDemo" type="button">Reset demo data</button>
     </section>
   `;
@@ -755,13 +934,14 @@ function memberStatusPanelHtml(association) {
 
   const { cyclePayments, receiver } = getAssociationMetrics(association);
   const payment = cyclePayments[member.id] || {};
-  const history = Array.from({ length: Math.max(association.members.length, 1) })
+  const cycleCount = Math.max(association.members.length, 1);
+  const historyRows = Array.from({ length: cycleCount })
     .map((_, index) => {
       const entry = association.payments?.[index]?.[member.id] || {};
       return `
         <tr>
           <td>${index + 1} - ${monthLabel(association.startMonth, index)}</td>
-          <td>${entry.paid ? "Paid" : "Unpaid"}</td>
+          <td><span class="tag ${entry.paid ? "paid-chip" : "unpaid-chip"}">${entry.paid ? "Paid" : "Unpaid"}</span></td>
           <td>${formatMoney(entry.amount || association.monthlyAmount)}</td>
           <td>${escapeHtml(entry.method || "-")}</td>
           <td>${escapeHtml(entry.paidAt || "-")}</td>
@@ -785,7 +965,7 @@ function memberStatusPanelHtml(association) {
       <section class="panel">
         <h3>Current cycle</h3>
         <div class="status-list">
-          <p><strong>Status:</strong> ${payment.paid ? "Paid" : "Unpaid"}</p>
+          <p><strong>Status:</strong> <span class="tag ${payment.paid ? "paid-chip" : "unpaid-chip"}">${payment.paid ? "Paid" : "Unpaid"}</span></p>
           <p><strong>Amount:</strong> ${formatMoney(payment.amount || association.monthlyAmount)}</p>
           <p><strong>Method:</strong> ${escapeHtml(payment.method || "-")}</p>
           <p><strong>Paid date:</strong> ${escapeHtml(payment.paidAt || "-")}</p>
@@ -794,20 +974,26 @@ function memberStatusPanelHtml(association) {
       </section>
       <section class="panel wide-panel">
         <h3>My payment history</h3>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Cycle</th>
-                <th>Status</th>
-                <th>Amount</th>
-                <th>Method</th>
-                <th>Paid date</th>
-              </tr>
-            </thead>
-            <tbody>${history}</tbody>
-          </table>
-        </div>
+        ${
+          historyRows
+            ? `
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Cycle</th>
+                      <th>Status</th>
+                      <th>Amount</th>
+                      <th>Method</th>
+                      <th>Paid date</th>
+                    </tr>
+                  </thead>
+                  <tbody>${historyRows}</tbody>
+                </table>
+              </div>
+            `
+            : `<p class="muted">No payment history yet.</p>`
+        }
       </section>
     </section>
   `;
@@ -825,7 +1011,7 @@ function bindPaymentEvents(association) {
         method: current.method || "Cash",
         paidAt:
           !current.paid && !current.paidAt
-            ? new Date().toISOString().slice(0, 10)
+            ? todayIso()
             : current.paidAt || "",
       });
     });
@@ -863,59 +1049,108 @@ function updatePayment(memberId, patch) {
   });
 }
 
-function showMemberFormError(message) {
-  const error = $("#memberFormError");
-  error.textContent = message;
-  error.classList.toggle("hidden", !message);
+function setMemberError(message) {
+  state.memberError = message;
+  render();
+}
+
+async function buildMemberFromForm(form, association, existingMember = null) {
+  const username = String(form.get("username") || "").trim();
+  const password = String(form.get("password") || "");
+  const confirmPassword = String(form.get("confirmPassword") || "");
+  const isEdit = Boolean(existingMember);
+
+  if (!username) throw new Error("Username is required.");
+  if (usernameExists(association, username, existingMember?.id || "")) {
+    throw new Error("That username already exists in this association.");
+  }
+  if (!isEdit && !password) throw new Error("Password is required.");
+  if ((password || confirmPassword) && (!password || !confirmPassword)) {
+    throw new Error("Enter and confirm the new password.");
+  }
+  if (password !== confirmPassword) throw new Error("Password confirmation must match.");
+  if (password && !ensureCryptoAvailable()) {
+    throw new Error("Web Crypto is unavailable, so passwords cannot be safely hashed.");
+  }
+
+  const next = {
+    ...(existingMember || emptyMember()),
+    name: String(form.get("name") || "").trim(),
+    phone: String(form.get("phone") || "").trim(),
+    nationalId: String(form.get("nationalId") || "").trim(),
+    address: String(form.get("address") || "").trim(),
+    notes: String(form.get("notes") || "").trim(),
+    username,
+    role: form.get("role") === "admin" ? "admin" : "member",
+  };
+  if (!next.name) throw new Error("Member name is required.");
+  if (password) {
+    next.passwordHash = "";
+    next.passwordRecord = await createPasswordRecord(password);
+  }
+  return next;
 }
 
 function bindMemberEvents() {
   $("#memberForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const association = selectedAssociation();
+    const association = sessionAssociation();
     const form = new FormData(event.currentTarget);
-    const username = String(form.get("username") || "").trim();
-    const password = String(form.get("password") || "");
-    const confirmPassword = String(form.get("confirmPassword") || "");
+    const memberId = String(form.get("memberId") || "");
+    const existingMember = association.members.find((member) => member.id === memberId) || null;
 
-    if (!ensureCryptoAvailable()) return showMemberFormError("Web Crypto is unavailable, so passwords cannot be safely hashed.");
-    if (!username) return showMemberFormError("Username is required.");
-    if (!password) return showMemberFormError("Password is required.");
-    if (password !== confirmPassword) return showMemberFormError("Password confirmation must match.");
-    if (usernameExists(association, username)) return showMemberFormError("That username already exists in this association.");
+    try {
+      const member = await buildMemberFromForm(form, association, existingMember);
+      updateAssociation((item) => {
+        if (existingMember) {
+          return {
+            ...item,
+            members: item.members.map((current) => (current.id === member.id ? member : current)),
+          };
+        }
+        return {
+          ...item,
+          members: [...item.members, member],
+          turnOrder: [...item.turnOrder, member.id],
+        };
+      });
+      state.editingMemberId = "";
+      state.memberError = "";
+    } catch (error) {
+      setMemberError(error.message || "Could not save member.");
+    }
+  });
 
-    const member = {
-      id: uid(),
-      name: String(form.get("name") || "").trim(),
-      phone: String(form.get("phone") || "").trim(),
-      nationalId: String(form.get("nationalId") || "").trim(),
-      address: String(form.get("address") || "").trim(),
-      notes: String(form.get("notes") || "").trim(),
-      username,
-      passwordHash: await hashPassword(password),
-      role: form.get("role") === "admin" ? "admin" : "member",
-    };
-    if (!member.name) return showMemberFormError("Member name is required.");
-    updateAssociation((item) => ({
-      ...item,
-      members: [...item.members, member],
-      turnOrder: [...item.turnOrder, member.id],
-    }));
+  $("#cancelEditMember")?.addEventListener("click", () => {
+    state.editingMemberId = "";
+    state.memberError = "";
+    render();
+  });
+
+  $$("[data-edit-member]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editingMemberId = button.dataset.editMember;
+      state.memberError = "";
+      render();
+    });
   });
 
   $$("[data-remove-member]").forEach((button) => {
     button.addEventListener("click", () => {
       const memberId = button.dataset.removeMember;
-      updateAssociation((association) => {
+      const association = sessionAssociation();
+      const member = association.members.find((item) => item.id === memberId);
+      if (!confirm(`Remove ${member?.name || "this member"}? This also removes their payment rows.`)) return;
+      updateAssociation((item) => {
         const payments = {};
-        Object.entries(association.payments || {}).forEach(([cycle, entries]) => {
+        Object.entries(item.payments || {}).forEach(([cycle, entries]) => {
           payments[cycle] = { ...entries };
           delete payments[cycle][memberId];
         });
         return {
-          ...association,
-          members: association.members.filter((member) => member.id !== memberId),
-          turnOrder: association.turnOrder.filter((id) => id !== memberId),
+          ...item,
+          members: item.members.filter((current) => current.id !== memberId),
+          turnOrder: item.turnOrder.filter((id) => id !== memberId),
           payments,
         };
       });
@@ -957,14 +1192,117 @@ function bindSettingsEvents() {
     }));
   });
   $("#resetDemo").addEventListener("click", () => {
+    if (!confirm("Reset all local data to demo data? This overwrites associations stored in this browser.")) return;
     state.data = seedData();
     state.selectedAssociationId = state.data.associations[0].id;
     state.selectedCycle = 0;
     state.activeTab = "payments";
     state.session = null;
+    state.importError = "";
     saveState();
     render();
   });
+}
+
+function sanitizeAssociationForShare(association) {
+  const { admin, ...safeAssociation } = normalizeAssociation(association);
+  return {
+    ...safeAssociation,
+    members: safeAssociation.members.map((member) => {
+      const { passwordHash, passwordRecord, nationalId, ...safeMember } = member;
+      return safeMember;
+    }),
+  };
+}
+
+function exportAssociation(kind) {
+  if (!currentUserIsAdmin()) return;
+  const association = sessionAssociation();
+  const isShare = kind === "share";
+  const payload = {
+    type: isShare ? "gam3eya-association-share" : "gam3eya-association-backup",
+    version: STORAGE_VERSION,
+    exportedAt: new Date().toISOString(),
+    association: isShare ? sanitizeAssociationForShare(association) : normalizeAssociation(association),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const safeName = association.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  link.href = url;
+  link.download = `${safeName || "association"}-${isShare ? "share" : "backup"}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function extractImportedAssociation(parsed) {
+  if (parsed?.type?.startsWith("gam3eya-association-") && parsed.association) {
+    return normalizeAssociation(parsed.association);
+  }
+  if (parsed?.id && parsed?.members && parsed?.turnOrder) {
+    return normalizeAssociation(parsed);
+  }
+  if (Array.isArray(parsed?.associations) && parsed.associations.length === 1) {
+    return normalizeAssociation(parsed.associations[0]);
+  }
+  throw new Error("Invalid import file. Choose a Gam3eya association backup or share JSON file.");
+}
+
+function importAssociation(association) {
+  const existing = state.data.associations.find((item) => item.id === association.id);
+  let nextAssociation = association;
+  if (existing) {
+    const replace = confirm(
+      `An association named "${existing.name}" already uses this ID. Replace it? Choose Cancel to import as a copy.`
+    );
+    if (!replace) {
+      nextAssociation = {
+        ...association,
+        id: uid(),
+        name: `${association.name} Copy`,
+      };
+    }
+    if (replace && !confirm("Replace the existing association data? This cannot be undone.")) return;
+  }
+
+  if (existing && nextAssociation.id === existing.id) {
+    state.data.associations = state.data.associations.map((item) =>
+      item.id === nextAssociation.id ? normalizeAssociation(nextAssociation) : item
+    );
+  } else {
+    state.data.associations.push(normalizeAssociation(nextAssociation));
+  }
+
+  state.selectedAssociationId = nextAssociation.id;
+  state.selectedCycle = 0;
+  state.activeTab = "payments";
+  state.session = null;
+  state.importError = "";
+  saveState();
+  render();
+}
+
+async function handleImportFile(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+
+  try {
+    const text = await file.text();
+    const association = extractImportedAssociation(JSON.parse(text));
+    const hasAuth = hasCredential(association.admin);
+    const message = hasAuth
+      ? `Import "${association.name}"? Backup auth records will be restored locally.`
+      : `Import "${association.name}"? This file has no admin credentials, so admin setup will be required.`;
+    if (!confirm(message)) return;
+    importAssociation(association);
+  } catch (error) {
+    state.importError = error.message || "Imported file invalid.";
+    if (state.activeTab !== "settings") state.activeTab = "settings";
+    render();
+  }
 }
 
 $("#associationForm").addEventListener("submit", (event) => {
@@ -972,14 +1310,13 @@ $("#associationForm").addEventListener("submit", (event) => {
   if (!currentUserIsAdmin()) return;
   const name = $("#newAssociationName").value.trim();
   if (!name) return;
-  const currentAssociation = selectedAssociation();
   const next = {
     id: uid(),
     name,
     monthlyAmount: Number($("#newAssociationAmount").value || 0),
     startMonth: $("#newAssociationStart").value || currentMonth(),
     status: "active",
-    admin: currentAssociation.admin ? { ...currentAssociation.admin } : null,
+    admin: null,
     members: [],
     turnOrder: [],
     payments: {},
@@ -987,6 +1324,8 @@ $("#associationForm").addEventListener("submit", (event) => {
   state.data.associations.push(next);
   state.selectedAssociationId = next.id;
   state.selectedCycle = 0;
+  state.session = null;
+  state.authError = "";
   $("#newAssociationName").value = "";
   $("#newAssociationAmount").value = "1000";
   $("#newAssociationStart").value = currentMonth();
@@ -1005,7 +1344,7 @@ $("#previousCycle").addEventListener("click", () => {
 });
 
 $("#nextCycle").addEventListener("click", () => {
-  const association = selectedAssociation();
+  const association = sessionAssociation();
   const cycleCount = Math.max(association.members.length, 1);
   state.selectedCycle = Math.min(cycleCount - 1, state.selectedCycle + 1);
   render();
@@ -1015,21 +1354,16 @@ $("#logoutButton").addEventListener("click", () => {
   state.session = null;
   state.activeTab = "payments";
   state.authError = "";
+  state.memberError = "";
+  state.importError = "";
+  state.editingMemberId = "";
   render();
 });
 
-$("#exportJson").addEventListener("click", () => {
-  if (!currentUserIsAdmin()) return;
-  const blob = new Blob([JSON.stringify(state.data, null, 2)], {
-    type: "application/json",
-  });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "gam3eya-data.json";
-  link.click();
-  URL.revokeObjectURL(url);
-});
+$("#exportJson").addEventListener("click", () => exportAssociation("backup"));
+$("#shareJson").addEventListener("click", () => exportAssociation("share"));
+$("#importJsonButton").addEventListener("click", () => $("#importJson").click());
+$("#importJson").addEventListener("change", handleImportFile);
 
 $("#newAssociationStart").value = currentMonth();
 saveState();

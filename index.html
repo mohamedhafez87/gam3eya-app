@@ -12,7 +12,7 @@
     <main class="app-shell hidden" id="appShell">
       <aside class="sidebar">
         <div>
-          <p class="eyebrow">Private tracker</p>
+          <p class="eyebrow">Savings circle tracker</p>
           <h1>Gam3eya Manager</h1>
           <p class="muted">Track circles, members, monthly payments, and payout turns.</p>
         </div>
@@ -20,7 +20,12 @@
         <section class="sidebar-section">
           <div class="section-title">
             <span>Associations</span>
-            <button class="ghost-button" id="exportJson" type="button">Export</button>
+            <div class="sidebar-actions">
+              <button class="ghost-button" id="exportJson" type="button">Backup</button>
+              <button class="ghost-button" id="shareJson" type="button">Share</button>
+              <button class="ghost-button" id="importJsonButton" type="button">Import</button>
+              <input id="importJson" class="hidden" type="file" accept="application/json,.json" />
+            </div>
           </div>
           <div class="association-list" id="associationList"></div>
         </section>
