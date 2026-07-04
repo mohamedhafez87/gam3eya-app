@@ -1,56 +1,145 @@
 # Gam3eya Manager
 
-A zero-dependency static web app for tracking gam3eya associations, members, monthly payments, and payout turns. Data is stored in the browser with `localStorage`.
+Phase 1 of Gam3eya Manager is a Supabase-backed React/Vite app for managing savings circles. It keeps GitHub Pages static deployment, but application data now lives in Supabase instead of browser-only `localStorage`.
+
+The previous localStorage app is archived under `legacy/localstorage-app/` for reference and migration support.
+
+## Stack
+
+- React + Vite + TypeScript
+- Supabase Auth for Owner/Admin users
+- Supabase Postgres with Row-Level Security
+- Static GitHub Pages deployment from `dist`
+
+No service-role key is used or expected in frontend code.
+
+## Environment
+
+Copy the example file and fill in your Supabase project values:
+
+```bash
+cp .env.example .env.local
+```
+
+Required variables:
+
+```text
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
+```
 
 ## Run Locally
 
 ```bash
+npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:4173/` or `http://localhost:4173/`.
+Other scripts:
 
-The app can also be opened directly from `index.html` in many browsers, but the local server is recommended because browser security features can behave differently for `file://` pages.
-
-## Publish on GitHub Pages
-
-1. Push this folder to a GitHub repository.
-2. In GitHub, open the repository settings.
-3. Go to **Pages**.
-4. Set **Source** to **GitHub Actions**.
-5. Push to the `main` branch, or run the **Deploy static site to GitHub Pages** workflow manually.
-
-The published URL will normally be:
-
-```text
-https://USERNAME.github.io/REPO_NAME/
+```bash
+npm run typecheck
+npm run build
+npm run preview
 ```
 
-The app is configured for repository-subpath hosting because `index.html` uses relative asset paths such as `src/styles.css` and `src/app.js`.
+## Supabase Setup
 
-## Local Access Accounts
+1. Create a Supabase project.
+2. Apply migrations from `supabase/migrations/`.
+3. Enable Email/Password auth in Supabase Auth.
+4. Add the app URL to Supabase Auth redirect URLs:
+   - local: `http://localhost:5173`
+   - GitHub Pages: `https://mohamedhafez87.github.io/gam3eya-app/`
+5. Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` locally and in GitHub Actions repository variables/secrets.
 
-Each association has its own local admin account:
+The migration creates:
 
-- If an association has no admin yet, selecting it shows first-time admin setup.
-- An admin can manage only the association they logged into.
-- Creating a new association does not copy the current admin credentials. The new association requires its own admin setup.
-- Members can log in only to the association where their username exists.
-- Members see only their own personal info, payment status, current cycle, receiver, and payment history.
+- `profiles`
+- `organizations`
+- `organization_members`
+- `people`
+- `gam3eyas`
+- `gam3eya_slots`
+- `payments`
+- `audit_log`
 
-Passwords are stored locally as salted PBKDF2-SHA-256 password records through the browser Web Crypto API. Older SHA-256 password hashes are still accepted and are upgraded after a successful login.
+It also enables RLS on every table and adds core RPCs:
 
-Existing `localStorage` data is migrated safely. Associations, members, payments, turn order, old admin hashes, and old member hashes are preserved.
+- `create_initial_organization(org_name text)`
+- `activate_gam3eya(gam3eya_id uuid)`
+- `record_payment(payment_id uuid, method text, paid_at timestamptz, notes text)`
+- `mark_payment_unpaid(payment_id uuid)`
 
-## Export and Import
+## Security Model
 
-Admins can export only the currently logged-in association.
+Organizations are tenants. A signed-in Supabase user can belong to one or more organizations through `organization_members`.
 
-- **Backup JSON** includes association data plus local auth password hashes/records. Use it to restore the association in the same browser or another personal device.
-- **Share JSON** removes admin credentials, member password hashes/records, and member national IDs. Use it when sending non-auth association data to someone else.
+RLS policies restrict reads and writes by organization membership:
 
-To restore data, log in as an admin and choose **Import**. The app accepts Gam3eya backup/share JSON files or a single exported association object. If the imported association ID already exists, the app asks whether to replace the existing association or import it as a copy. Share imports without admin credentials will require first-time admin setup before management.
+- users read/update only their own profile
+- organization data is visible only to organization members
+- Owner/Admin can manage people and draft gam3eyas
+- slots can be changed only while the gam3eya is draft
+- payments are read through table policies and written through RPC functions
+- audit log is readable by org members and not directly writable by the client
+
+Phase 1 UI focuses on the Owner role. The schema already includes `owner`, `admin`, and `collector` roles for future phases.
+
+## Product Rules in Phase 1
+
+- People are participant records only; there is no member self-login.
+- Monthly amount is per slot/share.
+- A person can own multiple slots in the same Gam3eya.
+- One receiver exists per month through the slot payout order.
+- Activating a draft locks the turn order and generates payment rows.
+- No partial payments.
+- No receipt uploads.
+- Late status is computed in the UI from unpaid payments past the due date.
+
+## GitHub Pages
+
+The workflow in `.github/workflows/pages.yml` installs dependencies, builds the Vite app, and deploys `dist` with official GitHub Pages actions.
+
+The Vite config uses `base: "./"` so generated assets work at:
+
+```text
+https://mohamedhafez87.github.io/gam3eya-app/
+```
+
+## Legacy Import
+
+Use the Import page to load JSON exported from the old localStorage app. The tool previews:
+
+- association name
+- people count
+- slot count
+- paid payment count
+
+On confirmation it maps:
+
+- legacy association -> `gam3eyas`
+- legacy members -> `people`
+- legacy `turnOrder` -> `gam3eya_slots`
+- legacy paid payments -> Supabase payments after activation
+
+## Backup Export
+
+The Import page includes an organization JSON export. Supabase free tier does not provide automated backups, so export data periodically until a production backup process exists.
+
+## Current Gaps
+
+This is Phase 1 foundation, not the full product roadmap. Not implemented yet:
+
+- invite flow
+- team and role management UI
+- member self-login
+- reminders
+- PDF/Excel reports
+- receipt uploads
+- billing/subscriptions
+- automated restore from backup JSON
 
 ## Security Note
 
-This GitHub Pages version is for personal/local tracking only. Static GitHub Pages/localStorage cannot protect private data or passwords from a determined user. For real shared secure access, use a backend/database such as Supabase, Firebase, or a Node API.
+The old GitHub Pages/localStorage version could not protect private data from a determined user. The new version uses Supabase Auth, Postgres, and RLS, but production deployments still require correct Supabase configuration, redirect URLs, backup procedures, and operational review.
